@@ -18,11 +18,10 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - uses: android-actions/setup-android@v3
       - name: Install Android SDK, NDK and CMake
         run: |
-          sdkmanager --install "platforms;android-35" "build-tools;35.0.0" "ndk;26.3.11579264" "cmake;3.22.1"
-          yes | sdkmanager --licenses >/dev/null || true
+          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install "platforms;android-35" "build-tools;35.0.0" "ndk;26.3.11579264" "cmake;3.22.1"
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses >/dev/null || true
       - name: Download pinned whisper.cpp sources
         run: git clone --depth 1 --branch v1.7.6 https://github.com/ggml-org/whisper.cpp.git mobile/vendor/whisper.cpp
       - uses: gradle/actions/setup-gradle@v4
