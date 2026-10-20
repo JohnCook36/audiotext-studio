@@ -4,6 +4,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import android.os.Environment
+import android.os.SystemClock
 import android.provider.OpenableColumns
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -79,6 +80,23 @@ private fun MainScreen(activity: MainActivity) {
     var outputs by remember { mutableStateOf<List<File>>(emptyList()) }
     var worker by remember { mutableStateOf<Job?>(null) }
     var downloadedModels by remember { mutableIntStateOf(0) }
+    var showSnake by remember { mutableStateOf(true) }
+    var processedSeconds by remember { mutableLongStateOf(0L) }
+    var totalAudioSeconds by remember { mutableLongStateOf(0L) }
+    var chunkNumber by remember { mutableIntStateOf(0) }
+    var beginRecognitionMs by remember { mutableLongStateOf(0L) }
+    var operationBeganMs by remember { mutableLongStateOf(0L) }
+    var elapsedSeconds by remember { mutableLongStateOf(0L) }
+    var etaSeconds by remember { mutableLongStateOf(-1L) }
+    val liveTranscript = remember { mutableStateListOf<String>() }
+
+    LaunchedEffect(busy) {
+        while (busy) {
+            elapsedSeconds = (SystemClock.elapsedRealtime() - operationBeganMs).coerceAtLeast(0L) / 1000
+            delay(1000)
+        }
+    }
+
 
     fun report(message: String, value: Float? = null) {
         activity.runOnUiThread {
@@ -106,6 +124,14 @@ private fun MainScreen(activity: MainActivity) {
             busy = true
             outputs = emptyList()
             progress = 0f
+            processedSeconds = 0
+            totalAudioSeconds = 0
+            chunkNumber = 0
+            etaSeconds = -1
+            beginRecognitionMs = 0L
+            operationBeganMs = SystemClock.elapsedRealtime()
+            elapsedSeconds = 0L
+            liveTranscript.clear()
             try {
                 withContext(Dispatchers.IO) {
                     val active = coroutineContext[Job]!!
@@ -167,9 +193,28 @@ private fun MainScreen(activity: MainActivity) {
                                 }
                                 if (needText) {
                                     report("Расшифровка на телефоне...", 0.44f)
+                                    beginRecognitionMs = SystemClock.elapsedRealtime()
                                     val segments = OfflineWhisper.transcribe(tempWav, requireNotNull(modelPath),
                                         { report("Распознавание: " + (it * 100).toInt() + "%", 0.44f + it * 0.54f) },
-                                        verify
+                                        verify,
+                                        { done, total, chunk, newSegments ->
+                                            val recognitionElapsed = (SystemClock.elapsedRealtime() - beginRecognitionMs)
+                                                .coerceAtLeast(0L)
+                                            val estimate = if (done > 0) {
+                                                (recognitionElapsed.toDouble() / done * (total - done) / 1000)
+                                                    .toLong().coerceAtLeast(0L)
+                                            } else -1L
+                                            activity.runOnUiThread {
+                                                processedSeconds = done
+                                                totalAudioSeconds = total
+                                                chunkNumber = chunk
+                                                etaSeconds = estimate
+                                                newSegments.forEach { seg ->
+                                                    liveTranscript.add("[" + (seg.startMs / 1000).toString() + " c] " + seg.text)
+                                                }
+                                                while (liveTranscript.size > 15) liveTranscript.removeAt(0)
+                                            }
+                                        }
                                     )
                                     val txt = File(dir, prefix + ".txt")
                                     val srt = File(dir, prefix + ".srt")
@@ -202,6 +247,46 @@ private fun MainScreen(activity: MainActivity) {
         Text("AudioText Studio", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
         Text("Аудио из видео и речь в текст — прямо на Android",
             color = MaterialTheme.colorScheme.onSurfaceVariant)
+
+        if (busy) {
+            ElevatedCard(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("Обработка записи", style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold)
+                    Text(status)
+                    LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth())
+                    Text("Общий прогресс: " + (progress * 100).toInt().toString() + "%")
+                    Text("Прошло: " + durationLabel(elapsedSeconds),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (totalAudioSeconds > 0L) {
+                        Text("Распознано " + durationLabel(processedSeconds) + " из " +
+                            durationLabel(totalAudioSeconds) + " аудио · блок " + chunkNumber,
+                            fontWeight = FontWeight.SemiBold)
+                        Text(if (etaSeconds >= 0L) "Осталось примерно: " +
+                            durationLabel(etaSeconds) else "Время завершения уточняется",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("Процент обновляется после каждого фрагмента до 25 секунд. " +
+                            "Между обновлениями Whisper продолжает работать.",
+                            style = MaterialTheme.typography.bodySmall)
+                    }
+                    if (liveTranscript.isNotEmpty()) {
+                        HorizontalDivider()
+                        Text("Уже распознано", fontWeight = FontWeight.Bold)
+                        liveTranscript.takeLast(5).forEach {
+                            Text(it, style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                    OutlinedButton(onClick = { worker?.cancel() },
+                        modifier = Modifier.fillMaxWidth()) { Text("Остановить обработку") }
+                }
+            }
+            if (mode != 2) {
+                OutlinedButton(onClick = { showSnake = !showSnake }, modifier = Modifier.fillMaxWidth()) {
+                    Text(if (showSnake) "Скрыть змейку" else "Играть в змейку")
+                }
+                if (showSnake) WaitingSnake(activity)
+            }
+        }
 
         ElevatedCard(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -259,13 +344,10 @@ private fun MainScreen(activity: MainActivity) {
             modifier = Modifier.fillMaxWidth().height(52.dp)) {
             Text(if (busy) "Обработка..." else "Начать обработку")
         }
-        if (busy) {
-            OutlinedButton(onClick = { worker?.cancel() }, modifier = Modifier.fillMaxWidth()) {
-                Text("Остановить")
-            }
+        if (!busy) {
+            LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth())
+            Text(status, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth())
-        Text(status, color = MaterialTheme.colorScheme.onSurfaceVariant)
         if (outputs.isNotEmpty()) {
             ElevatedCard(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -283,4 +365,10 @@ private fun MainScreen(activity: MainActivity) {
             color = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(Modifier.height(20.dp))
     }
+}
+
+private fun durationLabel(seconds: Long): String {
+    val minutes = seconds.coerceAtLeast(0L) / 60
+    val secs = seconds.coerceAtLeast(0L) % 60
+    return minutes.toString() + ":" + secs.toString().padStart(2, '0')
 }
