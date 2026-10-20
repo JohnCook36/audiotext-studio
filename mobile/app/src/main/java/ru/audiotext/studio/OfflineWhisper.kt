@@ -70,7 +70,9 @@ object OfflineWhisper {
         }
     }
 
-    fun transcribe(wav: File, model: File, update: (Float) -> Unit, verify: () -> Unit): List<Segment> {
+    fun transcribe(wav: File, model: File, update: (Float) -> Unit, verify: () -> Unit,
+        onChunk: (Long, Long, Int, List<Segment>) -> Unit = { _, _, _, _ -> }
+    ): List<Segment> {
         require(model.isFile) { "Модель Whisper не найдена" }
         val handle = NativeWhisper.open(model.absolutePath)
         require(handle != 0L) { "Не удалось открыть модель Whisper" }
@@ -94,17 +96,24 @@ object OfflineWhisper {
                         floats[i] = raw.toShort() / 32768f
                     }
                     val offsetMs = position / 32
+                    val newSegments = mutableListOf<Segment>()
                     NativeWhisper.recognize(handle, floats).forEach { encoded ->
                         val fields = encoded.split('\t', limit = 3)
                         if (fields.size == 3) {
                             val value = fields[2].trim()
                             val start = offsetMs + (fields[0].toLongOrNull() ?: 0L)
                             val end = offsetMs + (fields[1].toLongOrNull() ?: 0L)
-                            if (value.isNotBlank() && end > start) result.add(Segment(start, end, value))
+                            if (value.isNotBlank() && end > start) {
+                                val segment = Segment(start, end, value)
+                                result.add(segment)
+                                newSegments.add(segment)
+                            }
                         }
                     }
                     position += count
                     update((position.toFloat() / totalBytes).coerceIn(0f, 1f))
+                    onChunk(position / 32000, (totalBytes + 31999) / 32000,
+                        ((position + bytesPerChunk - 1) / bytesPerChunk).toInt(), newSegments)
                 }
             }
         } finally { NativeWhisper.close(handle) }
