@@ -1,0 +1,29 @@
+# Python / IDE
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+.buildvenv/
+.idea/
+.vscode/
+
+# PyInstaller / Inno Setup artifacts
+build/
+dist/
+installer/
+*.spec.bak
+
+# Local files and user data
+*.events
+*.log
+*.transcript.txt
+Результаты_распознавания/
+settings.json
+models/
+*.mp3
+*.mp4
+*.wav
+*.mkv
+*.srt
