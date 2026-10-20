@@ -31,7 +31,7 @@ class BackendTests(unittest.TestCase):
             src, out, is_video, mode = validate_job({'file': str(p), 'mode': 'both', 'model': 'small'})
             self.assertTrue(is_video)
             self.assertEqual(mode, 'both')
-            self.assertEqual(out, p.parent / 'Результаты_распознавания')
+            self.assertEqual(out, (p.parent / 'Результаты_распознавания').resolve())
 
     def test_audio_cannot_extract(self):
         with tempfile.TemporaryDirectory() as d:
