@@ -123,8 +123,12 @@ def extract_audio(source: Path, output: Path, audio_format: str, duration: float
            *codecs[audio_format], '-y', str(dest)]
     errors = []
     try:
+        # FFmpeg is a console executable. A windowed Windows build must launch it
+        # without creating a separate terminal window while preserving pipe progress.
+        flags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
         process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                   universal_newlines=True, encoding='utf-8', errors='replace')
+                                   universal_newlines=True, encoding='utf-8', errors='replace',
+                                   creationflags=flags)
         assert process.stdout is not None
         for line in process.stdout:
             s = line.strip()
