@@ -17,7 +17,7 @@ from tkinter import filedialog, messagebox, ttk
 from backend import AUDIO, VIDEO, worker_main
 
 APP = 'AudioText Studio'
-VERSION = '1.1.1'
+VERSION = '1.1.2'
 BG = '#0b1220'
 PANEL = '#172337'
 PANEL_DARK = '#101b2b'
@@ -94,6 +94,9 @@ class Studio(tk.Tk):
         self.event_file = None
         self.last_output = ''
         self.last_error = None
+        self.log_viewer_window = None
+        self.log_viewer_text = None
+        self.log_copy_status = tk.StringVar(value='')
 
         self._style()
         self._draw()
@@ -162,6 +165,9 @@ class Studio(tk.Tk):
         base.bind('<Configure>', lambda e: canvas.configure(scrollregion=canvas.bbox('all')))
         canvas.bind('<Configure>', lambda e: canvas.itemconfigure(win, width=e.width))
         def wheel(e):
+            # Logs have their own scrollbar; scrolling them must not scroll the whole form.
+            if isinstance(e.widget, tk.Text):
+                return
             canvas.yview_scroll(-int(e.delta / 120) if e.delta else 0, 'units')
         canvas.bind_all('<MouseWheel>', wheel)
 
@@ -297,19 +303,121 @@ class Studio(tk.Tk):
 
         logs = tk.Frame(base, bg=BG)
         logs.pack(fill='both', expand=True)
-        self.label(logs, 'ЖУРНАЛ ОБРАБОТКИ', 10, MUTED, True, bg=BG).pack(anchor='w', pady=(0, 7))
-        self.log_area = tk.Text(logs, height=4, relief='flat', wrap='word',
-                                bg=PANEL_DARK, fg=MUTED, insertbackground=TEXT, bd=0,
-                                font=('Consolas', 10), padx=13, pady=11, state='disabled')
-        self.log_area.pack(fill='both', expand=True)
+        log_header = tk.Frame(logs, bg=BG)
+        log_header.pack(fill='x', pady=(0, 7))
+        self.label(log_header, 'ЖУРНАЛ ОБРАБОТКИ', 10, MUTED, True,
+                   bg=BG).pack(side='left')
+        self.label(log_header, '', 9, ACCENT, bg=BG,
+                   textvariable=self.log_copy_status).pack(side='left', padx=(12, 0))
+
+        def log_button(text, command):
+            return tk.Button(log_header, text=text, command=command, cursor='hand2',
+                             relief='flat', bd=0, padx=13, pady=6, bg=PANEL,
+                             fg=TEXT, activebackground='#293b54', activeforeground=TEXT,
+                             font=('Segoe UI', 9, 'bold'))
+
+        log_button('Копировать журнал', self.copy_log).pack(side='right', padx=(8, 0))
+        log_button('Открыть отдельно ↗', self.open_log_window).pack(side='right')
+
+        log_body = tk.Frame(logs, bg=PANEL_DARK)
+        log_body.pack(fill='x')
+        log_scroll = ttk.Scrollbar(log_body, orient='vertical')
+        log_scroll.pack(side='right', fill='y')
+        self.log_area = self._make_log_text(log_body, 14, log_scroll)
+        self.log_area.pack(side='left', fill='both', expand=True)
+        log_scroll.configure(command=self.log_area.yview)
         self._append_log('Программа готова. Все файлы обрабатываются на вашем компьютере.')
         self._sync_mode()
 
+    def _make_log_text(self, parent, height, scrollbar):
+        widget = tk.Text(parent, height=height, relief='flat', wrap='word',
+                         bg=PANEL_DARK, fg=MUTED, insertbackground=TEXT, bd=0,
+                         selectbackground='#315582', selectforeground=TEXT,
+                         font=('Consolas', 11), padx=14, pady=12,
+                         yscrollcommand=scrollbar.set, state='disabled')
+        widget.bind('<Control-c>', self._copy_selected_log)
+        widget.bind('<Control-C>', self._copy_selected_log)
+        widget.bind('<Control-a>', self._select_all_log)
+        widget.bind('<Control-A>', self._select_all_log)
+        return widget
+
+    def _select_all_log(self, event):
+        widget = event.widget
+        widget.tag_add('sel', '1.0', 'end-1c')
+        widget.mark_set('insert', '1.0')
+        widget.see('1.0')
+        return 'break'
+
+    def _copy_selected_log(self, event):
+        self._copy_log_from_widget(event.widget, selected=True)
+        return 'break'
+
+    def _copy_log_from_widget(self, widget, selected=False):
+        try:
+            content = widget.get('sel.first', 'sel.last') if selected else widget.get('1.0', 'end-1c')
+        except tk.TclError:
+            # Ctrl+C with no selection copies the whole journal.
+            content = widget.get('1.0', 'end-1c')
+        if not content:
+            return
+        self.clipboard_clear()
+        self.clipboard_append(content)
+        self.update_idletasks()
+        self.log_copy_status.set('Скопировано')
+        self.after(2500, lambda: self.log_copy_status.set(''))
+
+    def copy_log(self):
+        self._copy_log_from_widget(self.log_area)
+
+    def open_log_window(self):
+        if self.log_viewer_window is not None and self.log_viewer_window.winfo_exists():
+            self.log_viewer_window.lift()
+            self.log_viewer_window.focus_force()
+            return
+        window = tk.Toplevel(self)
+        window.title('AudioText Studio — журнал обработки')
+        window.geometry('1000x600')
+        window.minsize(550, 320)
+        window.configure(bg=BG)
+        self.log_viewer_window = window
+        header = tk.Frame(window, bg=BG, padx=16, pady=12)
+        header.pack(fill='x')
+        self.label(header, 'Журнал обработки · Ctrl+A / Ctrl+C', 12, TEXT, True,
+                   bg=BG).pack(side='left')
+        tk.Button(header, text='Копировать весь журнал',
+                  command=lambda: self._copy_log_from_widget(self.log_viewer_text),
+                  relief='flat', bd=0, padx=14, pady=8, bg=PANEL,
+                  fg=TEXT, activebackground='#293b54', activeforeground=TEXT,
+                  font=('Segoe UI', 10, 'bold')).pack(side='right')
+        body = tk.Frame(window, bg=PANEL_DARK, padx=2, pady=2)
+        body.pack(fill='both', expand=True, padx=16, pady=(0, 16))
+        scroll = ttk.Scrollbar(body, orient='vertical')
+        scroll.pack(side='right', fill='y')
+        self.log_viewer_text = self._make_log_text(body, 20, scroll)
+        self.log_viewer_text.pack(side='left', fill='both', expand=True)
+        scroll.configure(command=self.log_viewer_text.yview)
+        self._put_log_text(self.log_viewer_text, self.log_area.get('1.0', 'end-1c'))
+
+        def close_viewer():
+            self.log_viewer_text = None
+            self.log_viewer_window = None
+            window.destroy()
+
+        window.protocol('WM_DELETE_WINDOW', close_viewer)
+
+    def _put_log_text(self, widget, content):
+        bottom = widget.yview()[1] >= 0.98
+        widget.configure(state='normal')
+        widget.insert('end', content)
+        widget.configure(state='disabled')
+        if bottom:
+            widget.see('end')
+
     def _append_log(self, message):
-        self.log_area.configure(state='normal')
-        self.log_area.insert('end', '• ' + message + '\n')
-        self.log_area.see('end')
-        self.log_area.configure(state='disabled')
+        line = '• ' + message + '\n'
+        self._put_log_text(self.log_area, line)
+        if self.log_viewer_text is not None:
+            self._put_log_text(self.log_viewer_text, line)
 
     def choose_file(self):
         path = filedialog.askopenfilename(parent=self, title='Выберите аудио или видео',

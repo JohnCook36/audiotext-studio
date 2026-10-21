@@ -12,17 +12,17 @@
 1. Откройте <https://github.com/JohnCook36/audiotext-studio/actions>.
 2. Найдите последний успешный запуск **Build Windows installer**.
 3. Внизу страницы запуска в разделе **Artifacts** скачайте `AudioTextStudio-Windows-Installer`.
-4. Распакуйте загруженный ZIP и откройте `AudioTextStudio_Setup_1.1.1.exe`.
+4. Распакуйте загруженный ZIP и откройте `AudioTextStudio_Setup_1.1.2.exe`.
 
 Каждый пуш в ветку main запускает сборку на GitHub Windows runner. Также workflow поддерживает **Run workflow**. Сборка может быть долгой, но ваш компьютер не участвует.
 
 ## Постоянная ссылка через Releases
 
-Для выпуска версии `v1.1.1` создайте тег через Git:
+Для выпуска версии `v1.1.2` создайте тег через Git:
 
 ```
-git tag v1.1.1
-git push origin v1.1.1
+git tag v1.1.2
+git push origin v1.1.2
 ```
 
 После успешной сборки установщик будет прикреплён к релизу в GitHub **Releases**. Для следующих версий используйте новые теги, например `v1.0.1`, и обновляйте исходный код по необходимости.
