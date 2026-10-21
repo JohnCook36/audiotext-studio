@@ -25,10 +25,11 @@ class BackendTests(unittest.TestCase):
         # This test runs on a Windows runner during installer CI.
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / 'lecture.mp4'
-            with patch('backend.find_ffmpeg', return_value='ffmpeg.exe'):
-                with patch('backend.subprocess.Popen', side_effect=OSError('test launch')) as launcher:
-                    with self.assertRaisesRegex(RuntimeError, 'Не удалось запустить FFmpeg'):
-                        extract_audio(source, Path(directory), 'mp3', None)
+            with patch('backend.event'):
+                with patch('backend.find_ffmpeg', return_value='ffmpeg.exe'):
+                    with patch('backend.subprocess.Popen', side_effect=OSError('test launch')) as launcher:
+                        with self.assertRaisesRegex(RuntimeError, 'Не удалось запустить FFmpeg'):
+                            extract_audio(source, Path(directory), 'mp3', None)
             expected = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
             self.assertEqual(launcher.call_args.kwargs['creationflags'], expected)
             self.assertEqual(launcher.call_args.kwargs['stdout'], subprocess.PIPE)
