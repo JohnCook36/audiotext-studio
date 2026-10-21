@@ -175,6 +175,31 @@ def check_cuda_available():
         raise RuntimeError('NVIDIA GPU с поддержкой CUDA не найдена. Выберите CPU или настройте драйвер NVIDIA.')
 
 
+def missing_cuda_runtime_dlls(search_dirs) -> list[str]:
+    """Only check directories visible to the app's DLL loader, not random downloads."""
+    names = ('cublas64_12.dll', 'cudnn64_9.dll')
+    paths = [Path(d) for d in search_dirs if d]
+    return [name for name in names if not any((folder / name).is_file() for folder in paths)]
+
+
+def check_cuda_runtime_dlls():
+    """Fail early rather than extracting a long video before a missing-DLL error."""
+    if sys.platform != 'win32':
+        return
+    root = Path(getattr(sys, '_MEIPASS', Path(sys.executable).parent))
+    dirs = [root, Path(sys.executable).parent]
+    dirs.extend(p.strip('"') for p in os.environ.get('PATH', '').split(os.pathsep) if p.strip())
+    missing = missing_cuda_runtime_dlls(dirs)
+    if missing:
+        raise RuntimeError(
+            'Для NVIDIA GPU недоступны библиотеки: ' + ', '.join(missing) + '. '
+            'Установите CUDA Toolkit 12 (cuBLAS) и cuDNN 9 с официального сайта NVIDIA. '
+            'Каталоги с DLL должны присутствовать в системной переменной PATH. '
+            'После установки перезапустите AudioText Studio. '
+            'Или выберите CPU в настройках.'
+        )
+
+
 def create_whisper_model(name: str, device: str):
     options = whisper_device_options(device)
     if device == 'cuda':
@@ -254,6 +279,7 @@ def run_job(job: dict):
     if mode != 'extract' and job.get('device', 'cpu') == 'cuda':
         event('status', message='Проверка NVIDIA GPU…')
         check_cuda_available()
+        check_cuda_runtime_dlls()
     if is_video and mode in ('extract', 'both'):
         work = extract_audio(source, output, job.get('audio_format', 'mp3'), duration)
     if mode != 'extract':

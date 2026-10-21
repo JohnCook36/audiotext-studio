@@ -17,7 +17,7 @@ from tkinter import filedialog, messagebox, ttk
 from backend import AUDIO, VIDEO, worker_main
 
 APP = 'AudioText Studio'
-VERSION = '1.1.0'
+VERSION = '1.1.1'
 BG = '#0b1220'
 PANEL = '#172337'
 PANEL_DARK = '#101b2b'

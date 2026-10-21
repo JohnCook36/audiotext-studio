@@ -51,7 +51,7 @@ if not defined ISCC (
    goto :error
 )
 
-echo [4/4] Собираю установщик AudioTextStudio_Setup_1.1.0.exe ...
+echo [4/4] Собираю установщик AudioTextStudio_Setup_1.1.1.exe ...
 "%ISCC%" installer.iss
 if errorlevel 1 goto :error
 

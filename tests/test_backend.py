@@ -34,6 +34,17 @@ class BackendTests(unittest.TestCase):
             self.assertEqual(launcher.call_args.kwargs['creationflags'], expected)
             self.assertEqual(launcher.call_args.kwargs['stdout'], subprocess.PIPE)
 
+    def test_cuda_runtime_library_probe(self):
+        from backend import missing_cuda_runtime_dlls
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            self.assertEqual(missing_cuda_runtime_dlls([directory]),
+                             ['cublas64_12.dll', 'cudnn64_9.dll'])
+            (directory / 'cublas64_12.dll').touch()
+            self.assertEqual(missing_cuda_runtime_dlls([directory]), ['cudnn64_9.dll'])
+            (directory / 'cudnn64_9.dll').touch()
+            self.assertEqual(missing_cuda_runtime_dlls([directory]), [])
+
     def test_device_selection(self):
         from backend import whisper_device_options
         self.assertEqual(whisper_device_options('cpu'), {'device': 'cpu', 'compute_type': 'int8'})
