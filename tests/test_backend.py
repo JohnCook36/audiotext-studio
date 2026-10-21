@@ -2,10 +2,12 @@ import tempfile
 import unittest
 import json
 import os
+import subprocess
+import sys
 from unittest.mock import patch
 from pathlib import Path
 
-from backend import parse_ffmpeg_timestamp, timecode, unique_path, validate_job, event, AUDIO, VIDEO
+from backend import parse_ffmpeg_timestamp, timecode, unique_path, validate_job, event, extract_audio, AUDIO, VIDEO
 
 
 class BackendTests(unittest.TestCase):
@@ -17,6 +19,19 @@ class BackendTests(unittest.TestCase):
     def test_ffmpeg_time(self):
         self.assertAlmostEqual(parse_ffmpeg_timestamp('00:00:03.250'), 3.25)
         self.assertIsNone(parse_ffmpeg_timestamp('N/A'))
+
+
+    def test_ffmpeg_launch_does_not_open_terminal(self):
+        # This test runs on a Windows runner during installer CI.
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'lecture.mp4'
+            with patch('backend.find_ffmpeg', return_value='ffmpeg.exe'):
+                with patch('backend.subprocess.Popen', side_effect=OSError('test launch')) as launcher:
+                    with self.assertRaisesRegex(RuntimeError, 'Не удалось запустить FFmpeg'):
+                        extract_audio(source, Path(directory), 'mp3', None)
+            expected = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+            self.assertEqual(launcher.call_args.kwargs['creationflags'], expected)
+            self.assertEqual(launcher.call_args.kwargs['stdout'], subprocess.PIPE)
 
     def test_unique_path(self):
         with tempfile.TemporaryDirectory() as d:
