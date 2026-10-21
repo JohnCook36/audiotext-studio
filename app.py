@@ -17,7 +17,7 @@ from tkinter import filedialog, messagebox, ttk
 from backend import AUDIO, VIDEO, worker_main
 
 APP = 'AudioText Studio'
-VERSION = '1.0.0'
+VERSION = '1.1.0'
 BG = '#0b1220'
 PANEL = '#172337'
 PANEL_DARK = '#101b2b'
@@ -28,6 +28,7 @@ ACCENT = '#4ad2ba'
 ACCENT_DARK = '#0d3a35'
 BLUE = '#729cf8'
 ERROR = '#ff9696'
+DEVICE_LABELS = {'cpu': 'CPU — процессор', 'cuda': 'GPU — NVIDIA CUDA'}
 
 
 def cfg_path() -> Path:
@@ -78,6 +79,7 @@ class Studio(tk.Tk):
         self.output_var = tk.StringVar(value=self.config_data.get('output', ''))
         self.mode_var = tk.StringVar(value=self.config_data.get('mode', 'both'))
         self.model_var = tk.StringVar(value=self.config_data.get('model', 'small'))
+        self.device_var = tk.StringVar(value=DEVICE_LABELS.get(self.config_data.get('device', 'cpu'), DEVICE_LABELS['cpu']))
         self.lang_var = tk.StringVar(value=self.config_data.get('language', 'ru'))
         self.format_var = tk.StringVar(value=self.config_data.get('audio_format', 'mp3'))
         self.srt_var = tk.BooleanVar(value=self.config_data.get('srt', True))
@@ -231,7 +233,13 @@ class Studio(tk.Tk):
         self.lang_box = ttk.Combobox(r2, state='readonly', style='Studio.TCombobox',
                                       textvariable=self.lang_var, values=['ru', 'auto', 'en'])
         self.lang_box.pack(fill='x', pady=(3, 0))
-        self.label(o, 'small — баланс скорости и качества', 9, MUTED).pack(anchor='w')
+        gpu_row = tk.Frame(o, bg=PANEL)
+        gpu_row.pack(fill='x', pady=(0, 7))
+        self.label(gpu_row, 'Где выполнять распознавание', 10, MUTED).pack(anchor='w')
+        self.device_box = ttk.Combobox(gpu_row, state='readonly', style='Studio.TCombobox',
+                                        textvariable=self.device_var, values=list(DEVICE_LABELS.values()))
+        self.device_box.pack(fill='x', pady=(3, 0))
+        self.label(o, 'CPU: без CUDA; GPU: CUDA 12 + cuDNN 9', 9, MUTED).pack(anchor='w')
 
         more = self.card(base)
         more.pack(fill='x', pady=(0, 15))
@@ -329,6 +337,7 @@ class Studio(tk.Tk):
         self.format_box.configure(state='readonly' if mode in ('both', 'extract') else 'disabled')
         transcription = mode != 'extract'
         self.model_box.configure(state='readonly' if transcription else 'disabled')
+        self.device_box.configure(state='readonly' if transcription else 'disabled')
         self.lang_box.configure(state='readonly' if transcription else 'disabled')
         self.chk_srt.configure(state='normal' if transcription else 'disabled')
         self.chk_vad.configure(state='normal' if transcription else 'disabled')
@@ -346,6 +355,7 @@ class Studio(tk.Tk):
         self._sync_mode()
         settings = {'file': str(file.resolve()), 'output': self.output_var.get().strip(),
                     'mode': self.mode_var.get(), 'model': self.model_var.get(),
+                    'device': next((key for key, label in DEVICE_LABELS.items() if label == self.device_var.get()), 'cpu'),
                     'language': self.lang_var.get(), 'audio_format': self.format_var.get(),
                     'srt': self.srt_var.get(), 'vad': self.vad_var.get()}
         save_config({k: v for k, v in settings.items() if k not in ('file',)})

@@ -18,6 +18,7 @@ VIDEO = {'.mp4', '.mkv', '.mov', '.avi', '.webm', '.wmv', '.m4v', '.flv', '.mpeg
 AUDIO = {'.mp3', '.wav', '.m4a', '.aac', '.flac', '.ogg', '.opus', '.wma', '.aiff', '.aif', '.amr', '.mp4a'}
 FORMATS = ('mp3', 'm4a', 'wav')
 MODELS = ('tiny', 'base', 'small', 'medium', 'large-v3')
+DEVICES = ('cpu', 'cuda')
 
 
 def event(kind: str, **data):
@@ -105,6 +106,8 @@ def validate_job(job: dict) -> tuple[Path, Path, bool, str]:
         raise ValueError('Неизвестный формат аудио.')
     if job.get('model', 'small') not in MODELS:
         raise ValueError('Неизвестная модель распознавания.')
+    if job.get('device', 'cpu') not in DEVICES:
+        raise ValueError('Неизвестное устройство распознавания: выберите CPU или GPU.')
     output_text = job.get('output', '').strip()
     output = Path(output_text).expanduser().resolve() if output_text else source.parent / 'Результаты_распознавания'
     return source, output, is_video, mode
@@ -149,15 +152,56 @@ def extract_audio(source: Path, output: Path, audio_format: str, duration: float
     return dest
 
 
+def whisper_device_options(device: str) -> dict:
+    """Выбор CPU int8 или CUDA float16 без автоматической подмены устройства."""
+    if device == 'cpu':
+        return {'device': 'cpu', 'compute_type': 'int8'}
+    if device == 'cuda':
+        return {'device': 'cuda', 'compute_type': 'float16'}
+    raise ValueError('Неподдерживаемое устройство Whisper: ' + str(device))
+
+
+def check_cuda_available():
+    """Проверка драйвера и GPU перед долгим извлечением аудио."""
+    try:
+        import ctranslate2
+        count = ctranslate2.get_cuda_device_count()
+    except (RuntimeError, OSError, ImportError) as exc:
+        raise RuntimeError(
+            'Не удалось определить NVIDIA GPU. Проверьте драйвер NVIDIA и CUDA 12. '
+            'Причина: ' + str(exc)
+        ) from exc
+    if count < 1:
+        raise RuntimeError('NVIDIA GPU с поддержкой CUDA не найдена. Выберите CPU или настройте драйвер NVIDIA.')
+
+
+def create_whisper_model(name: str, device: str):
+    options = whisper_device_options(device)
+    if device == 'cuda':
+        check_cuda_available()
+    from faster_whisper import WhisperModel
+    try:
+        return WhisperModel(name, **options)
+    except Exception as exc:
+        if device == 'cuda':
+            raise RuntimeError(
+                'Whisper не удалось запустить на NVIDIA GPU. '
+                'Нужны CUDA 12 (cuBLAS) и cuDNN 9, доступные приложению, '
+                'а также актуальный драйвер NVIDIA. Можно выбрать CPU. '
+                'Причина: ' + str(exc)
+            ) from exc
+        raise
+
+
 def transcribe(source: Path, original: Path, output: Path, job: dict, pct_start: int) -> tuple[Path, Path | None]:
     # Импорт внутри worker: главное окно быстро открывается даже при больших библиотеках.
-    from faster_whisper import WhisperModel
-
     model_name = job.get('model', 'small')
     language = job.get('language', 'ru')
+    device = job.get('device', 'cpu')
     event('status', message='Подготовка модели ' + model_name + '…')
+    event('log', message='Устройство: ' + ('NVIDIA GPU (CUDA / float16)' if device == 'cuda' else 'CPU (int8)'))
     event('log', message='При первом запуске модель скачивается из интернета. В дальнейшем работает локально.')
-    model = WhisperModel(model_name, device='cpu', compute_type='int8')
+    model = create_whisper_model(model_name, device)
     event('status', message='Распознавание речи…')
     segments, info = model.transcribe(
         str(source), language=None if language == 'auto' else language,
@@ -207,6 +251,9 @@ def run_job(job: dict):
         event('log', message=f'Длительность: {int(duration // 60)} мин. {int(duration % 60)} сек.')
     event('progress', value=0)
     work = source
+    if mode != 'extract' and job.get('device', 'cpu') == 'cuda':
+        event('status', message='Проверка NVIDIA GPU…')
+        check_cuda_available()
     if is_video and mode in ('extract', 'both'):
         work = extract_audio(source, output, job.get('audio_format', 'mp3'), duration)
     if mode != 'extract':

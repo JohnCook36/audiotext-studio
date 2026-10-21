@@ -34,6 +34,43 @@ class BackendTests(unittest.TestCase):
             self.assertEqual(launcher.call_args.kwargs['creationflags'], expected)
             self.assertEqual(launcher.call_args.kwargs['stdout'], subprocess.PIPE)
 
+    def test_device_selection(self):
+        from backend import whisper_device_options
+        self.assertEqual(whisper_device_options('cpu'), {'device': 'cpu', 'compute_type': 'int8'})
+        self.assertEqual(whisper_device_options('cuda'), {'device': 'cuda', 'compute_type': 'float16'})
+        with self.assertRaises(ValueError):
+            whisper_device_options('auto')
+
+    def test_reject_unknown_device(self):
+        with tempfile.TemporaryDirectory() as folder:
+            src = Path(folder) / 'record.wav'
+            src.touch()
+            with self.assertRaisesRegex(ValueError, 'устройство'):
+                validate_job({'file': str(src), 'mode': 'transcribe', 'device': 'invalid'})
+
+    def test_cpu_model_is_explicitly_cpu(self):
+        from backend import create_whisper_model
+        with patch('faster_whisper.WhisperModel') as make:
+            created = create_whisper_model('small', 'cpu')
+        make.assert_called_once_with('small', device='cpu', compute_type='int8')
+        self.assertIs(created, make.return_value)
+
+    def test_cuda_model_is_explicitly_cuda(self):
+        from backend import create_whisper_model
+        with patch('ctranslate2.get_cuda_device_count', return_value=1):
+            with patch('faster_whisper.WhisperModel') as make:
+                created = create_whisper_model('small', 'cuda')
+        make.assert_called_once_with('small', device='cuda', compute_type='float16')
+        self.assertIs(created, make.return_value)
+
+    def test_cuda_does_not_fallback_to_cpu(self):
+        from backend import create_whisper_model
+        with patch('ctranslate2.get_cuda_device_count', return_value=0):
+            with patch('faster_whisper.WhisperModel') as make:
+                with self.assertRaisesRegex(RuntimeError, 'NVIDIA GPU'):
+                    create_whisper_model('small', 'cuda')
+        make.assert_not_called()
+
     def test_unique_path(self):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / 'запись.txt'
