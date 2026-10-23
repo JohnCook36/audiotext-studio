@@ -15,9 +15,10 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from backend import AUDIO, VIDEO, worker_main
+from resume_state import checkpoint_summary
 
 APP = 'AudioText Studio'
-VERSION = '1.1.2'
+VERSION = '1.2.0'
 BG = '#0b1220'
 PANEL = '#172337'
 PANEL_DARK = '#101b2b'
@@ -100,6 +101,11 @@ class Studio(tk.Tk):
 
         self._style()
         self._draw()
+        for variable in (self.file_var, self.output_var, self.mode_var,
+                         self.model_var, self.lang_var, self.format_var,
+                         self.srt_var, self.vad_var):
+            variable.trace_add('write', lambda *_: self.after_idle(self._sync_resume_button))
+        self._sync_resume_button()
         self.after(90, self._poll_events)
 
     def _setup_icon(self):
@@ -295,11 +301,17 @@ class Studio(tk.Tk):
         actions.pack(fill='x', pady=(11, 0))
         self.start_button = self.btn(actions, '▶  Начать обработку', self.start, primary=True)
         self.start_button.pack(side='left')
+        self.resume_button = self.btn(actions, '↻  Продолжить',
+                                      lambda: self.start(resume_policy='resume'))
         self.stop_button = self.btn(actions, '■  Остановить', self.stop)
         self.stop_button.configure(state='disabled')
         self.stop_button.pack(side='left', padx=(10, 0))
         self.open_button = self.btn(actions, 'Открыть результаты ↗', self.open_results)
         self.open_button.pack(side='right')
+
+        self.resume_info_var = tk.StringVar(value='')
+        self.label(sr, '', 10, ACCENT, bg=PANEL,
+                   textvariable=self.resume_info_var).pack(anchor='w', pady=(8, 0))
 
         logs = tk.Frame(base, bg=BG)
         logs.pack(fill='both', expand=True)
@@ -450,7 +462,41 @@ class Studio(tk.Tk):
         self.chk_srt.configure(state='normal' if transcription else 'disabled')
         self.chk_vad.configure(state='normal' if transcription else 'disabled')
 
-    def start(self):
+    def _job_settings(self, file):
+        return {'file': str(file.resolve()), 'output': self.output_var.get().strip(),
+                'mode': self.mode_var.get(), 'model': self.model_var.get(),
+                'device': next((key for key, label in DEVICE_LABELS.items()
+                                if label == self.device_var.get()), 'cpu'),
+                'language': self.lang_var.get(), 'audio_format': self.format_var.get(),
+                'srt': self.srt_var.get(), 'vad': self.vad_var.get()}
+
+    def _sync_resume_button(self):
+        if not hasattr(self, 'resume_button'):
+            return
+        file = Path(self.file_var.get().strip().strip('"')).expanduser()
+        existing = None
+        if not self.active and file.is_file() and self.mode_var.get() != 'extract':
+            settings = self._job_settings(file)
+            folder = Path(settings['output']).expanduser().resolve() if settings['output'] else (
+                file.parent / 'Результаты_распознавания').resolve()
+            try:
+                existing = checkpoint_summary(settings, file.resolve(), folder)
+            except (OSError, RuntimeError, ValueError):
+                existing = None
+        if existing is not None:
+            if not self.resume_button.winfo_manager():
+                self.resume_button.pack(side='left', padx=(10, 0),
+                                        before=self.stop_button)
+            seconds = int(existing['cursor_seconds'])
+            self.resume_info_var.set(
+                f"Найдена сохранённая расшифровка — обработано "
+                f"{seconds // 60} мин. {seconds % 60} сек."
+            )
+        else:
+            self.resume_button.pack_forget()
+            self.resume_info_var.set('')
+
+    def start(self, resume_policy=None):
         if self.active:
             return
         file = Path(self.file_var.get().strip().strip('"')).expanduser()
@@ -461,12 +507,26 @@ class Studio(tk.Tk):
             messagebox.showerror(APP, 'Этот формат пока не поддерживается.', parent=self)
             return
         self._sync_mode()
-        settings = {'file': str(file.resolve()), 'output': self.output_var.get().strip(),
-                    'mode': self.mode_var.get(), 'model': self.model_var.get(),
-                    'device': next((key for key, label in DEVICE_LABELS.items() if label == self.device_var.get()), 'cpu'),
-                    'language': self.lang_var.get(), 'audio_format': self.format_var.get(),
-                    'srt': self.srt_var.get(), 'vad': self.vad_var.get()}
-        save_config({k: v for k, v in settings.items() if k not in ('file',)})
+        settings = self._job_settings(file)
+        if settings['mode'] != 'extract':
+            folder = Path(settings['output']).expanduser().resolve() if settings['output'] else (
+                file.parent / 'Результаты_распознавания').resolve()
+            try:
+                existing = checkpoint_summary(settings, file.resolve(), folder)
+            except (OSError, RuntimeError) as exc:
+                messagebox.showerror(APP, str(exc), parent=self)
+                return
+            if existing is not None and resume_policy is None:
+                answer = messagebox.askyesnocancel(
+                    APP, 'Найдена незавершённая расшифровка.\n\n'
+                    'Да — продолжить с последней контрольной точки.\n'
+                    'Нет — начать заново (предыдущий TXT/SRT останется).\n'
+                    'Отмена — ничего не делать.', parent=self)
+                if answer is None:
+                    return
+                resume_policy = 'resume' if answer else 'restart'
+        settings['resume_policy'] = resume_policy or 'auto'
+        save_config({k: v for k, v in settings.items() if k not in ('file', 'resume_policy')})
         self.last_output = settings['output'] or str(file.parent / 'Результаты_распознавания')
         self.last_error = None
         self.progress_var.set(0)
@@ -499,6 +559,7 @@ class Studio(tk.Tk):
             return
         self.active = True
         self.start_button.configure(state='disabled')
+        self.resume_button.configure(state='disabled')
         self.stop_button.configure(state='normal')
         self._append_log('Обработка начата: ' + file.name)
         threading.Thread(target=self._read_worker, args=(self.process, self.event_file), daemon=True).start()
@@ -551,8 +612,10 @@ class Studio(tk.Tk):
                     self.active = False
                     self.process = None
                     self.start_button.configure(state='normal')
+                    self.resume_button.configure(state='normal')
                     self.stop_button.configure(state='disabled')
                     self._cleanup_job_file()
+                    self._sync_resume_button()
                     if data.get('code') and not self.last_error:
                         self.status_var.set('Обработка прервана или завершилась с ошибкой')
                         self._append_log('Процесс завершился с кодом ' + str(data['code']))
