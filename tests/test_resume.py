@@ -151,7 +151,9 @@ class ResumeTests(unittest.TestCase):
              patch("backend.event"):
             run_job(job)
         extract.assert_not_called()
-        self.assertEqual(transcription.call_args.args[0], mp3)
+        reused = transcription.call_args.args[0]
+        self.assertEqual(reused.name, mp3.name)
+        self.assertEqual(reused.read_bytes(), mp3.read_bytes())
 
 
 if __name__ == "__main__":
