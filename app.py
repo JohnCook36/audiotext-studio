@@ -12,13 +12,13 @@ import time
 import threading
 import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, ttk, simpledialog
 
 from backend import AUDIO, VIDEO, worker_main
 from resume_state import checkpoint_summary
 
 APP = 'AudioText Studio'
-VERSION = '1.3.0'
+VERSION = '1.4.0'
 BG = '#0b1220'
 PANEL = '#172337'
 PANEL_DARK = '#101b2b'
@@ -88,11 +88,16 @@ class Studio(tk.Tk):
         self.performance_var = tk.StringVar(value=self.config_data.get('performance_mode', 'balanced'))
         self.reserve_var = tk.StringVar(value=str(self.config_data.get('resource_reserve', 20)))
         self.workers_var = tk.StringVar(value=str(self.config_data.get('worker_count', 0)))
+        self.diarize_var = tk.BooleanVar(value=self.config_data.get('diarize', False))
+        self.speaker_count_var = tk.StringVar(value=str(self.config_data.get('speaker_count', 'auto')))
+        self.speaker_device_var = tk.StringVar(value=self.config_data.get('speaker_device', 'cpu'))
+        self.hf_token_var = tk.StringVar(value='')
         self.eta_var = tk.StringVar(value='')
         self.eta_seconds = None
         self.eta_received = 0
         self.eta_workers = 0
         self.eta_speed = None
+        self.eta_phase = None
         self.status_var = tk.StringVar(value='Выбери файл, чтобы начать')
         self.progress_var = tk.DoubleVar(value=0)
         self.progress_caption = tk.StringVar(value='0%')
@@ -317,6 +322,54 @@ class Studio(tk.Tk):
                                         values=['mp3', 'm4a', 'wav'])
         self.format_box.pack(side='left')
 
+        speaker_card = self.card(base)
+        speaker_card.pack(fill='x', pady=(0, 15))
+        speaker_area = tk.Frame(speaker_card, bg=PANEL, padx=20, pady=14)
+        speaker_area.pack(fill='x')
+        self.label(speaker_area, '05   ГОВОРЯЩИЕ (ДОПОЛНИТЕЛЬНЫЙ МОДУЛЬ)',
+                   10, BLUE, True).pack(anchor='w', pady=(0, 8))
+        self.chk_diarize = tk.Checkbutton(
+            speaker_area, text='Определять говорящих (pyannote Community-1)',
+            variable=self.diarize_var, bg=PANEL, fg=TEXT, selectcolor=PANEL_DARK,
+            activebackground=PANEL, activeforeground=TEXT,
+            font=('Segoe UI', 10), highlightthickness=0, borderwidth=0)
+        self.chk_diarize.pack(anchor='w')
+        voice_opts = tk.Frame(speaker_area, bg=PANEL)
+        voice_opts.pack(fill='x', pady=(8, 4))
+        count_area = tk.Frame(voice_opts, bg=PANEL)
+        count_area.pack(side='left', fill='x', expand=True)
+        self.label(count_area, 'Количество голосов', 9, MUTED).pack(anchor='w')
+        self.speaker_count_box = ttk.Combobox(
+            count_area, state='readonly', style='Studio.TCombobox',
+            textvariable=self.speaker_count_var,
+            values=['auto'] + [str(n) for n in range(2, 13)])
+        self.speaker_count_box.pack(fill='x', pady=(3, 0))
+        device_area = tk.Frame(voice_opts, bg=PANEL)
+        device_area.pack(side='left', fill='x', expand=True, padx=(12, 0))
+        self.label(device_area, 'Диаризация на', 9, MUTED).pack(anchor='w')
+        self.speaker_device_box = ttk.Combobox(
+            device_area, state='readonly', style='Studio.TCombobox',
+            textvariable=self.speaker_device_var, values=['cpu', 'cuda'])
+        self.speaker_device_box.pack(fill='x', pady=(3, 0))
+        self.label(speaker_area, 'Токен Hugging Face (нужен для первой загрузки модели)',
+                   9, MUTED).pack(anchor='w', pady=(6, 3))
+        self.hf_token_entry = tk.Entry(
+            speaker_area, textvariable=self.hf_token_var, show='●',
+            bg=PANEL_DARK, fg=TEXT, insertbackground=TEXT, relief='flat',
+            font=('Segoe UI', 10))
+        self.hf_token_entry.pack(fill='x', ipady=7)
+        self.label(speaker_area,
+                   'Сначала прими условия модели в Hugging Face. Токен не сохраняется в настройках.',
+                   9, MUTED).pack(anchor='w', pady=(5, 8))
+        actions = tk.Frame(speaker_area, bg=PANEL)
+        actions.pack(fill='x')
+        self.speakers_existing_button = self.btn(
+            actions, 'Голоса в готовом TXT…', self.start_speakers_existing)
+        self.speakers_existing_button.pack(side='left')
+        self.rename_speakers_button = self.btn(
+            actions, 'Переименовать голоса…', self.rename_existing_speakers)
+        self.rename_speakers_button.pack(side='left', padx=(10, 0))
+
         statuscard = self.card(fixed)
         statuscard.pack(fill='x')
         sr = tk.Frame(statuscard, bg=PANEL, padx=20, pady=13)
@@ -497,6 +550,7 @@ class Studio(tk.Tk):
         self.chk_vad.configure(state='normal' if transcription else 'disabled')
         for setting in (self.performance_box, self.reserve_box, self.workers_box):
             setting.configure(state='readonly' if transcription else 'disabled')
+        self.chk_diarize.configure(state='normal' if transcription else 'disabled')
 
     def _job_settings(self, file):
         return {'file': str(file.resolve()), 'output': self.output_var.get().strip(),
@@ -507,7 +561,11 @@ class Studio(tk.Tk):
                 'srt': self.srt_var.get(), 'vad': self.vad_var.get(),
                 'performance_mode': self.performance_var.get(),
                 'resource_reserve': int(self.reserve_var.get()),
-                'worker_count': int(self.workers_var.get())}
+                'worker_count': int(self.workers_var.get()),
+                'diarize': self.diarize_var.get(),
+                'speaker_count': 0 if self.speaker_count_var.get() == 'auto'
+                                 else int(self.speaker_count_var.get()),
+                'speaker_device': self.speaker_device_var.get()}
 
     def _sync_resume_button(self):
         if not hasattr(self, 'resume_button'):
@@ -535,7 +593,43 @@ class Studio(tk.Tk):
             self.resume_button.pack_forget()
             self.resume_info_var.set('')
 
-    def start(self, resume_policy=None):
+    def start_speakers_existing(self):
+        if self.active:
+            return
+        filename = filedialog.askopenfilename(
+            parent=self, title='Выберите готовую расшифровку AudioText Studio',
+            filetypes=[('Текст AudioText Studio', '*.txt'), ('Все файлы', '*.*')])
+        if filename:
+            self.start(speakers_only_txt=filename)
+
+    def rename_existing_speakers(self):
+        if self.active:
+            return
+        filename = filedialog.askopenfilename(
+            parent=self, title='Файл данных распознанных говорящих',
+            filetypes=[('Данные голосов', '*_speakers.json'), ('JSON', '*.json')])
+        if not filename:
+            return
+        try:
+            from speaker_diarization import rename_speakers
+            data = json.loads(Path(filename).read_text(encoding='utf-8'))
+            names = data.get('speaker_names')
+            if not isinstance(names, dict) or not names:
+                raise ValueError('В выбранном файле нет данных говорящих.')
+            changes = {}
+            for speaker, old in names.items():
+                new = simpledialog.askstring(APP, f'Имя для {old}:',
+                                              initialvalue=old, parent=self)
+                if new is None:
+                    return
+                changes[speaker] = new
+            rename_speakers(Path(filename), changes)
+            messagebox.showinfo(APP, 'Имена обновлены в TXT/SRT, повторный анализ не нужен.',
+                                parent=self)
+        except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
+            messagebox.showerror(APP, 'Ошибка переименования: ' + str(exc), parent=self)
+
+    def start(self, resume_policy=None, speakers_only_txt=None):
         if self.active:
             return
         file = Path(self.file_var.get().strip().strip('"')).expanduser()
@@ -547,7 +641,11 @@ class Studio(tk.Tk):
             return
         self._sync_mode()
         settings = self._job_settings(file)
-        if settings['mode'] != 'extract':
+        if speakers_only_txt:
+            settings['mode'] = 'speakers_only'
+            settings['transcript_txt'] = str(Path(speakers_only_txt).resolve())
+            settings['diarize'] = True
+        if settings['mode'] in ('both', 'transcribe'):
             folder = Path(settings['output']).expanduser().resolve() if settings['output'] else (
                 file.parent / 'Результаты_распознавания').resolve()
             try:
@@ -565,15 +663,19 @@ class Studio(tk.Tk):
                     return
                 resume_policy = 'resume' if answer else 'restart'
         settings['resume_policy'] = resume_policy or 'auto'
-        save_config({k: v for k, v in settings.items() if k not in ('file', 'resume_policy')})
-        self.last_output = settings['output'] or str(file.parent / 'Результаты_распознавания')
+        save_config({k: v for k, v in settings.items()
+                     if k not in ('file', 'resume_policy', 'hf_token', 'transcript_txt')
+                     and v != 'speakers_only'})
+        self.last_output = (str(Path(speakers_only_txt).parent) if speakers_only_txt
+                            else settings['output'] or str(file.parent / 'Результаты_распознавания'))
         self.last_error = None
         self.progress_var.set(0)
         self.progress_caption.set('0%')
         self.status_var.set('Запуск обработки…')
         self.eta_seconds = None
+        self.eta_phase = None
         self.eta_var.set('Осталось: рассчитывается после первого фрагмента…'
-                         if settings['mode'] != 'extract' else '')
+                         if settings['mode'] in ('both', 'transcribe') else '')
         try:
             with tempfile.NamedTemporaryFile(mode='w', suffix='.json', prefix='ats_',
                                               encoding='utf-8', delete=False) as handle:
@@ -591,6 +693,10 @@ class Studio(tk.Tk):
                 self.event_file = handle.name
             env = os.environ.copy()
             env['ATS_EVENT_FILE'] = self.event_file
+            # HF credentials go through an inherited environment variable, not
+            # the on-disk temporary job JSON or persisted app settings.
+            if self.hf_token_var.get().strip():
+                env['ATS_HF_TOKEN'] = self.hf_token_var.get().strip()
             flags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
             if sys.platform == 'win32' and settings.get('performance_mode') != 'fast':
                 flags |= subprocess.BELOW_NORMAL_PRIORITY_CLASS
@@ -604,6 +710,8 @@ class Studio(tk.Tk):
         self.active = True
         self.start_button.configure(state='disabled')
         self.resume_button.configure(state='disabled')
+        self.speakers_existing_button.configure(state='disabled')
+        self.rename_speakers_button.configure(state='disabled')
         self.stop_button.configure(state='normal')
         self._append_log('Обработка начата: ' + file.name)
         threading.Thread(target=self._read_worker, args=(self.process, self.event_file), daemon=True).start()
@@ -644,6 +752,7 @@ class Studio(tk.Tk):
                     self.eta_seconds = data.get('remaining_seconds')
                     self.eta_received = time.monotonic()
                     self.eta_workers = data.get('workers', 1)
+                    self.eta_phase = data.get('phase')
                     processed = data.get('processed_audio_seconds', 0)
                     total = data.get('total_audio_seconds', 0)
                     self.eta_speed = (processed, total)
@@ -667,6 +776,8 @@ class Studio(tk.Tk):
                     self.process = None
                     self.start_button.configure(state='normal')
                     self.resume_button.configure(state='normal')
+                    self.speakers_existing_button.configure(state='normal')
+                    self.rename_speakers_button.configure(state='normal')
                     self.stop_button.configure(state='disabled')
                     self._cleanup_job_file()
                     self._sync_resume_button()
@@ -684,7 +795,9 @@ class Studio(tk.Tk):
 
     def _render_eta(self):
         if self.eta_seconds is None:
-            self.eta_var.set('Осталось: оценка после первого готового блока…')
+            self.eta_var.set('Анализ голосов: вычисляем оставшееся время…'
+                             if self.eta_phase == 'speakers'
+                             else 'Осталось: оценка после первого готового блока…')
             return
         # Recalculate in the UI between individual 60-second audio chunks.
         elapsed = max(0., time.monotonic() - self.eta_received)
@@ -695,7 +808,10 @@ class Studio(tk.Tk):
             minutes = max(1, round(remaining / 60))
             hours, mins = divmod(minutes, 60)
             estimate = (f'≈ {hours} ч {mins} мин' if hours else f'≈ {mins} мин')
-        self.eta_var.set(f'Осталось: {estimate} · обработчиков: {self.eta_workers}')
+        if self.eta_phase == 'speakers':
+            self.eta_var.set(f'Голоса · осталось: {estimate} (приблизительно)')
+        else:
+            self.eta_var.set(f'Осталось: {estimate} · обработчиков: {self.eta_workers}')
 
     def _tick_eta(self):
         if self.active and self.eta_seconds is not None:

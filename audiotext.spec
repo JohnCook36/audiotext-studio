@@ -3,7 +3,8 @@
 from PyInstaller.utils.hooks import collect_all
 
 binaries = []
-datas = [('assets/app.ico', 'assets')]
+datas = [('assets/app.ico', 'assets'),
+         ('speaker_runtime.py', '.')]
 hiddenimports = []
 for module in (
     'ctranslate2', 'faster_whisper', 'onnxruntime', 'av', 'tokenizers',

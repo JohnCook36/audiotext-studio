@@ -111,6 +111,9 @@ def validate_job(job: dict) -> tuple[Path, Path, bool, str]:
     from parallel_engine import worker_settings
     worker_settings(job.get('device', 'cpu'), job.get('performance_mode', 'balanced'),
                     job.get('worker_count', 0), job.get('resource_reserve', 20))
+    if job.get('diarize', False):
+        from speaker_diarization import validate_speaker_settings
+        validate_speaker_settings(job)
     output_text = job.get('output', '').strip()
     output = Path(output_text).expanduser().resolve() if output_text else source.parent / 'Результаты_распознавания'
     return source, output, is_video, mode
@@ -298,6 +301,7 @@ def transcribe(source: Path, original: Path, output: Path, job: dict, pct_start:
         raise RuntimeError('Не удалось определить длительность аудио для безопасного '
                            'параллельного распознавания. Попробуйте WAV или MP3.')
     total_ms = max(1, round(duration * 1000))
+    pct_end = 85 if job.get('diarize', False) else 100
     model_name = job.get('model', 'small')
     language = job.get('language', 'ru')
     device = job.get('device', 'cpu')
@@ -333,7 +337,7 @@ def transcribe(source: Path, original: Path, output: Path, job: dict, pct_start:
                                  workers=worker_count, cpu_threads=cpu_threads)
     event('status', message='Параллельное распознавание с контрольными точками…')
     event('progress', value=min(99, int(pct_start +
-                                          (100 - pct_start) * total_done_ms / total_ms)))
+                                          (pct_end - pct_start) * total_done_ms / total_ms)))
     event('eta', remaining_seconds=None, workers=worker_count,
           processed_audio_seconds=total_done_ms / 1000,
           total_audio_seconds=total_ms / 1000)
@@ -389,7 +393,7 @@ def transcribe(source: Path, original: Path, output: Path, job: dict, pct_start:
         done_ms = completed_audio_ms(state)
         remaining = estimate.record((core_end - core_start) / 1000, done_ms / 1000)
         event('progress', value=min(99, int(pct_start +
-                                          (100 - pct_start) * done_ms / total_ms)))
+                                          (pct_end - pct_start) * done_ms / total_ms)))
         event('eta', remaining_seconds=round(remaining) if remaining is not None else None,
               workers=worker_count, processed_audio_seconds=done_ms / 1000,
               total_audio_seconds=total_ms / 1000)
@@ -406,9 +410,10 @@ def transcribe(source: Path, original: Path, output: Path, job: dict, pct_start:
                            'оставлена для повторного запуска.')
     render_transcripts(state, output, original)
     checkpoint.unlink(missing_ok=True)
-    event('eta', remaining_seconds=0, workers=worker_count,
-          processed_audio_seconds=total_ms / 1000,
-          total_audio_seconds=total_ms / 1000)
+    if not job.get('diarize', False):
+        event('eta', remaining_seconds=0, workers=worker_count,
+              processed_audio_seconds=total_ms / 1000,
+              total_audio_seconds=total_ms / 1000)
     event('log', message='Расшифровка завершена; все контрольные точки закрыты.')
     event('log', message='Текст сохранён: ' + txt.name)
     if srt:
@@ -417,6 +422,23 @@ def transcribe(source: Path, original: Path, output: Path, job: dict, pct_start:
 
 
 def run_job(job: dict):
+    if job.get('mode') == 'speakers_only':
+        from speaker_diarization import run_diarization, validate_speaker_settings
+        validate_speaker_settings(job)
+        source = Path(job['file']).expanduser().resolve()
+        transcript = Path(job['transcript_txt']).expanduser().resolve()
+        if not source.is_file():
+            raise ValueError('Не найден оригинальный файл записи.')
+        if source.suffix.lower() not in VIDEO | AUDIO:
+            raise ValueError('Неподдерживаемый формат источника.')
+        if not transcript.is_file() or transcript.suffix.lower() != '.txt':
+            raise ValueError('Не найден готовый TXT AudioText Studio.')
+        output = transcript.parent
+        event('log', message='Назначение голосов в существующей расшифровке: ' + transcript.name)
+        run_diarization(source, transcript, output, job)
+        event('progress', value=100)
+        event('done', output=str(output), message='Говорящие определены, Whisper повторно не запускался.')
+        return
     source, output, is_video, mode = validate_job(job)
     output.mkdir(parents=True, exist_ok=True)
     event('status', message='Подготовка файла…')
@@ -452,8 +474,13 @@ def run_job(job: dict):
                 save_checkpoint(checkpoint, state)
 
     if mode != 'extract':
-        transcribe(work, source, output, job, 42 if is_video and mode == 'both' else 0,
-                   state, checkpoint)
+        txt, _ = transcribe(work, source, output, job, 42 if is_video and mode == 'both' else 0,
+                            state, checkpoint)
+        if job.get('diarize', False):
+            from speaker_diarization import run_diarization
+            event('progress', value=85)
+            event('eta', remaining_seconds=None, workers=1)
+            run_diarization(work, txt, output, job)
     event('progress', value=100)
     event('done', output=str(output), message='Готово. Файлы сохранены.')
 
