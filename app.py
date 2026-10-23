@@ -89,7 +89,9 @@ class Studio(tk.Tk):
         self.reserve_var = tk.StringVar(value=str(self.config_data.get('resource_reserve', 20)))
         self.workers_var = tk.StringVar(value=str(self.config_data.get('worker_count', 0)))
         self.diarize_var = tk.BooleanVar(value=self.config_data.get('diarize', False))
-        self.speaker_count_var = tk.StringVar(value=str(self.config_data.get('speaker_count', 'auto')))
+        self.speaker_count_var = tk.StringVar(
+            value=('auto' if self.config_data.get('speaker_count', 0) in (0, '0', 'auto')
+                   else str(self.config_data['speaker_count'])))
         self.speaker_device_var = tk.StringVar(value=self.config_data.get('speaker_device', 'cpu'))
         self.hf_token_var = tk.StringVar(value='')
         self.eta_var = tk.StringVar(value='')

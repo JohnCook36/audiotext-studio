@@ -16,6 +16,9 @@ class SpeakerDiarizationTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.folder = Path(self.temp.name)
+        event_patcher = patch("speaker_diarization.event")
+        event_patcher.start()
+        self.addCleanup(event_patcher.stop)
         self.source = self.folder / "Лекция.wav"
         self.source.write_bytes(b"fake-media")
         self.txt = self.folder / "Лекция_transcript.txt"
