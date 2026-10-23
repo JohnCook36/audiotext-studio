@@ -18,7 +18,7 @@ from backend import AUDIO, VIDEO, worker_main
 from resume_state import checkpoint_summary
 
 APP = 'AudioText Studio'
-VERSION = '1.2.0'
+VERSION = '1.3.0'
 BG = '#0b1220'
 PANEL = '#172337'
 PANEL_DARK = '#101b2b'
@@ -85,6 +85,14 @@ class Studio(tk.Tk):
         self.format_var = tk.StringVar(value=self.config_data.get('audio_format', 'mp3'))
         self.srt_var = tk.BooleanVar(value=self.config_data.get('srt', True))
         self.vad_var = tk.BooleanVar(value=self.config_data.get('vad', True))
+        self.performance_var = tk.StringVar(value=self.config_data.get('performance_mode', 'balanced'))
+        self.reserve_var = tk.StringVar(value=str(self.config_data.get('resource_reserve', 20)))
+        self.workers_var = tk.StringVar(value=str(self.config_data.get('worker_count', 0)))
+        self.eta_var = tk.StringVar(value='')
+        self.eta_seconds = None
+        self.eta_received = 0
+        self.eta_workers = 0
+        self.eta_speed = None
         self.status_var = tk.StringVar(value='Выбери файл, чтобы начать')
         self.progress_var = tk.DoubleVar(value=0)
         self.progress_caption = tk.StringVar(value='0%')
@@ -107,6 +115,7 @@ class Studio(tk.Tk):
             variable.trace_add('write', lambda *_: self.after_idle(self._sync_resume_button))
         self._sync_resume_button()
         self.after(90, self._poll_events)
+        self.after(15000, self._tick_eta)
 
     def _setup_icon(self):
         ico = Path(getattr(sys, '_MEIPASS', Path(__file__).resolve().parent)) / 'assets' / 'app.ico'
@@ -252,6 +261,29 @@ class Studio(tk.Tk):
                                         textvariable=self.device_var, values=list(DEVICE_LABELS.values()))
         self.device_box.pack(fill='x', pady=(3, 0))
         self.label(o, 'CPU: без CUDA; GPU: CUDA 12 + cuDNN 9', 9, MUTED).pack(anchor='w')
+        perf_row = tk.Frame(o, bg=PANEL)
+        perf_row.pack(fill='x', pady=(12, 7))
+        self.label(perf_row, 'Производительность', 10, MUTED).pack(anchor='w')
+        self.performance_box = ttk.Combobox(
+            perf_row, state='readonly', style='Studio.TCombobox',
+            textvariable=self.performance_var, values=['balanced', 'quiet', 'fast'])
+        self.performance_box.pack(fill='x', pady=(3, 0))
+        tuning = tk.Frame(o, bg=PANEL)
+        tuning.pack(fill='x', pady=(0, 6))
+        left = tk.Frame(tuning, bg=PANEL)
+        left.pack(side='left', fill='x', expand=True)
+        right = tk.Frame(tuning, bg=PANEL)
+        right.pack(side='left', fill='x', expand=True, padx=(9, 0))
+        self.label(left, 'Запас ресурсов, %', 9, MUTED).pack(anchor='w')
+        self.reserve_box = ttk.Combobox(left, state='readonly', style='Studio.TCombobox',
+                                         textvariable=self.reserve_var, values=['15', '20', '25'])
+        self.reserve_box.pack(fill='x', pady=(3, 0))
+        self.label(right, 'Обработчиков (0 = авто)', 9, MUTED).pack(anchor='w')
+        self.workers_box = ttk.Combobox(right, state='readonly', style='Studio.TCombobox',
+                                         textvariable=self.workers_var,
+                                         values=['0', '1', '2', '3', '4'])
+        self.workers_box.pack(fill='x', pady=(3, 0))
+        self.label(o, 'balanced — баланс · quiet — фоновый · fast — быстрый', 9, MUTED).pack(anchor='w')
 
         more = self.card(base)
         more.pack(fill='x', pady=(0, 15))
@@ -297,6 +329,8 @@ class Studio(tk.Tk):
         ttk.Progressbar(sr, variable=self.progress_var, maximum=100,
                         style='Studio.Horizontal.TProgressbar').pack(fill='x', pady=(9, 9))
         self.label(sr, '', 11, MUTED, textvariable=self.status_var).pack(anchor='w')
+        self.label(sr, '', 12, ACCENT, True,
+                   textvariable=self.eta_var).pack(anchor='w', pady=(5, 0))
         actions = tk.Frame(sr, bg=PANEL)
         actions.pack(fill='x', pady=(11, 0))
         self.start_button = self.btn(actions, '▶  Начать обработку', self.start, primary=True)
@@ -461,6 +495,8 @@ class Studio(tk.Tk):
         self.lang_box.configure(state='readonly' if transcription else 'disabled')
         self.chk_srt.configure(state='normal' if transcription else 'disabled')
         self.chk_vad.configure(state='normal' if transcription else 'disabled')
+        for setting in (self.performance_box, self.reserve_box, self.workers_box):
+            setting.configure(state='readonly' if transcription else 'disabled')
 
     def _job_settings(self, file):
         return {'file': str(file.resolve()), 'output': self.output_var.get().strip(),
@@ -468,7 +504,10 @@ class Studio(tk.Tk):
                 'device': next((key for key, label in DEVICE_LABELS.items()
                                 if label == self.device_var.get()), 'cpu'),
                 'language': self.lang_var.get(), 'audio_format': self.format_var.get(),
-                'srt': self.srt_var.get(), 'vad': self.vad_var.get()}
+                'srt': self.srt_var.get(), 'vad': self.vad_var.get(),
+                'performance_mode': self.performance_var.get(),
+                'resource_reserve': int(self.reserve_var.get()),
+                'worker_count': int(self.workers_var.get())}
 
     def _sync_resume_button(self):
         if not hasattr(self, 'resume_button'):
@@ -532,6 +571,9 @@ class Studio(tk.Tk):
         self.progress_var.set(0)
         self.progress_caption.set('0%')
         self.status_var.set('Запуск обработки…')
+        self.eta_seconds = None
+        self.eta_var.set('Осталось: рассчитывается после первого фрагмента…'
+                         if settings['mode'] != 'extract' else '')
         try:
             with tempfile.NamedTemporaryFile(mode='w', suffix='.json', prefix='ats_',
                                               encoding='utf-8', delete=False) as handle:
@@ -550,6 +592,8 @@ class Studio(tk.Tk):
             env = os.environ.copy()
             env['ATS_EVENT_FILE'] = self.event_file
             flags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+            if sys.platform == 'win32' and settings.get('performance_mode') != 'fast':
+                flags |= subprocess.BELOW_NORMAL_PRIORITY_CLASS
             self.process = subprocess.Popen(command, stdout=subprocess.DEVNULL,
                                             stderr=subprocess.DEVNULL, env=env,
                                             creationflags=flags)
@@ -596,11 +640,21 @@ class Studio(tk.Tk):
                     value = min(100, max(0, float(data.get('value', 0))))
                     self.progress_var.set(value)
                     self.progress_caption.set(f'{int(value)}%')
+                elif kind == 'eta':
+                    self.eta_seconds = data.get('remaining_seconds')
+                    self.eta_received = time.monotonic()
+                    self.eta_workers = data.get('workers', 1)
+                    processed = data.get('processed_audio_seconds', 0)
+                    total = data.get('total_audio_seconds', 0)
+                    self.eta_speed = (processed, total)
+                    self._render_eta()
                 elif kind == 'status':
                     self.status_var.set(data.get('message', ''))
                 elif kind == 'log':
                     self._append_log(data.get('message', ''))
                 elif kind == 'done':
+                    self.eta_seconds = 0
+                    self.eta_var.set('Расшифровка завершена')
                     self.last_output = data.get('output', self.last_output)
                     self.status_var.set('Готово! Результаты сохранены.')
                     self._append_log('✓ ' + data.get('message', 'Готово'))
@@ -627,6 +681,26 @@ class Studio(tk.Tk):
         except queue.Empty:
             pass
         self.after(90, self._poll_events)
+
+    def _render_eta(self):
+        if self.eta_seconds is None:
+            self.eta_var.set('Осталось: оценка после первого готового блока…')
+            return
+        # Recalculate in the UI between individual 60-second audio chunks.
+        elapsed = max(0., time.monotonic() - self.eta_received)
+        remaining = max(0, round(self.eta_seconds - elapsed))
+        if remaining == 0:
+            estimate = 'менее минуты' if self.active else '0 мин'
+        else:
+            minutes = max(1, round(remaining / 60))
+            hours, mins = divmod(minutes, 60)
+            estimate = (f'≈ {hours} ч {mins} мин' if hours else f'≈ {mins} мин')
+        self.eta_var.set(f'Осталось: {estimate} · обработчиков: {self.eta_workers}')
+
+    def _tick_eta(self):
+        if self.active and self.eta_seconds is not None:
+            self._render_eta()
+        self.after(15000, self._tick_eta)
 
     def _cleanup_job_file(self):
         for filename in (self.job_file, self.event_file):

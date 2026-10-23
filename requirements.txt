@@ -1,3 +1,4 @@
 faster-whisper==1.2.1
 av==18.1.0
 imageio-ffmpeg==0.6.0
+psutil>=6,<9

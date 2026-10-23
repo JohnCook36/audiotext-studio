@@ -27,7 +27,7 @@ class ResumeTests(unittest.TestCase):
             "file": str(self.source), "output": str(self.output),
             "mode": "transcribe", "model": "small", "language": "ru",
             "device": "cpu", "srt": True, "vad": False,
-            "audio_format": "mp3",
+            "audio_format": "mp3", "worker_count": 1,
         }
 
     def test_checkpoint_identity_survives_cpu_to_gpu(self):
@@ -129,6 +129,43 @@ class ResumeTests(unittest.TestCase):
         text = (self.output / txtname).read_text(encoding="utf-8-sig")
         self.assertEqual(text.count("фраза"), 3)
         self.assertEqual(len(set(line for line in text.splitlines() if "фраза" in line)), 3)
+
+    def test_out_of_order_blocks_survive_restart(self):
+        from resume_state import migrate_parallel_checkpoint, sync_completed_blocks, completed_audio_ms
+        with patch("backend.event"):
+            state, path = begin_resume_job(self.job, self.source, self.output)
+        migrate_parallel_checkpoint(state)
+        state["completed_chunks"]["60000"] = {
+            "end_ms": 120000,
+            "segments": [[61000, 62000, "Средний фрагмент"]]
+        }
+        self.assertEqual(sync_completed_blocks(state), 0)
+        self.assertEqual(completed_audio_ms(state), 60000)
+        save_checkpoint(path, state)
+        with patch("backend.event"):
+            restored, path = begin_resume_job(self.job, self.source, self.output)
+        self.assertEqual(restored["cursor_ms"], 0)
+        self.assertIn("Средний фрагмент",
+                      (self.output / restored["txt_name"]).read_text(encoding="utf-8-sig"))
+        recorded = []
+
+        class FakeModel:
+            def transcribe(self, samples, **kwargs):
+                return [SimpleNamespace(start=1, end=3, text="Первый")], SimpleNamespace(language="ru")
+
+        def decoder(source, start, end):
+            recorded.append(start)
+            return np.zeros(round((end - start) * 16000), dtype=np.float32)
+
+        with patch("backend.create_whisper_model", return_value=FakeModel()), \
+             patch("backend.decode_transcription_chunk", side_effect=decoder), \
+             patch("backend.media_duration", return_value=180.), \
+             patch("backend.event"):
+            transcribe(self.source, self.source, self.output, self.job, 0, restored, path)
+        self.assertEqual(recorded, [0., 118.])
+        data = (self.output / restored["txt_name"]).read_text(encoding="utf-8-sig")
+        self.assertEqual(data.count("Средний фрагмент"), 1)
+        self.assertFalse(path.exists())
 
     def test_video_audio_is_reused_on_retry(self):
         video = self.source.with_suffix(".mp4")

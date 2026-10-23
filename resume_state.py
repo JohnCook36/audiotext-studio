@@ -58,6 +58,21 @@ def load_checkpoint(job: dict, source: Path, output: Path) -> dict | None:
         assert state["schema"] == SCHEMA
         assert isinstance(state["cursor_ms"], int) and state["cursor_ms"] >= 0
         assert isinstance(state["segments"], list)
+        if "completed_chunks" in state:
+            assert isinstance(state["completed_chunks"], dict)
+            assert isinstance(state.get("base_cursor_ms"), int)
+            assert isinstance(state.get("legacy_segments"), list)
+            for key, block in state["completed_chunks"].items():
+                assert isinstance(key, str) and key.isdigit()
+                assert isinstance(block, dict)
+                assert isinstance(block["end_ms"], int) and block["end_ms"] > int(key)
+                assert isinstance(block["segments"], list)
+                assert all(
+                    isinstance(x, list) and len(x) == 3 and
+                    isinstance(x[0], int) and isinstance(x[1], int)
+                    and 0 <= x[0] < x[1] and isinstance(x[2], str)
+                    for x in block["segments"]
+                )
         assert isinstance(state["txt_name"], str)
         _checked_basename(state["txt_name"], output, ".txt")
         if state["srt_name"] is not None:
@@ -134,6 +149,42 @@ def format_ms(milliseconds: int, srt: bool = False) -> str:
     return f"{hh:02}:{mm:02}:{ss:02}{',' if srt else '.'}{frac:03}"
 
 
+def migrate_parallel_checkpoint(state: dict) -> None:
+    """Preserve a 1.2.0 checkpoint without losing its completed audio."""
+    if "completed_chunks" in state:
+        return
+    state["base_cursor_ms"] = int(state["cursor_ms"])
+    state["legacy_segments"] = list(state["segments"])
+    state["completed_chunks"] = {}
+
+
+def sync_completed_blocks(state: dict) -> int:
+    """Rebuild ordered output, and contiguous cursor, from durable finished blocks."""
+    migrate_parallel_checkpoint(state)
+    saved = list(state["legacy_segments"])
+    blocks = state["completed_chunks"]
+    for key in sorted(blocks, key=int):
+        saved.extend(blocks[key]["segments"])
+    saved.sort(key=lambda x: (x[0], x[1]))
+    state["segments"] = saved
+
+    cursor = state["base_cursor_ms"]
+    while str(cursor) in blocks:
+        next_cursor = blocks[str(cursor)]["end_ms"]
+        if next_cursor <= cursor:
+            raise RuntimeError("Некорректная контрольная точка: зацикливание блоков.")
+        cursor = next_cursor
+    state["cursor_ms"] = cursor
+    return cursor
+
+
+def completed_audio_ms(state: dict) -> int:
+    migrate_parallel_checkpoint(state)
+    return state["base_cursor_ms"] + sum(
+        x["end_ms"] - int(k) for k, x in state["completed_chunks"].items()
+    )
+
+
 def checkpoint_summary(job: dict, source: Path, output: Path) -> dict | None:
     """Fast lookup for GUI; it does not start Whisper or read any media data."""
     state = load_checkpoint(job, source, output)
@@ -141,6 +192,7 @@ def checkpoint_summary(job: dict, source: Path, output: Path) -> dict | None:
         return None
     return {
         "cursor_seconds": state["cursor_ms"] / 1000,
+        "completed_audio_seconds": completed_audio_ms(state) / 1000,
         "segments": len(state["segments"]),
         "txt_name": state["txt_name"],
     }

@@ -108,6 +108,9 @@ def validate_job(job: dict) -> tuple[Path, Path, bool, str]:
         raise ValueError('Неизвестная модель распознавания.')
     if job.get('device', 'cpu') not in DEVICES:
         raise ValueError('Неизвестное устройство распознавания: выберите CPU или GPU.')
+    from parallel_engine import worker_settings
+    worker_settings(job.get('device', 'cpu'), job.get('performance_mode', 'balanced'),
+                    job.get('worker_count', 0), job.get('resource_reserve', 20))
     output_text = job.get('output', '').strip()
     output = Path(output_text).expanduser().resolve() if output_text else source.parent / 'Результаты_распознавания'
     return source, output, is_video, mode
@@ -200,8 +203,13 @@ def check_cuda_runtime_dlls():
         )
 
 
-def create_whisper_model(name: str, device: str):
+def create_whisper_model(name: str, device: str, workers: int = 1,
+                         cpu_threads: int | None = None):
     options = whisper_device_options(device)
+    if workers > 1:
+        options['num_workers'] = workers
+    if cpu_threads is not None:
+        options['cpu_threads'] = cpu_threads
     if device == 'cuda':
         check_cuda_available()
     from faster_whisper import WhisperModel
@@ -277,56 +285,75 @@ def begin_resume_job(job: dict, source: Path, output: Path):
 
 def transcribe(source: Path, original: Path, output: Path, job: dict, pct_start: int,
                state: dict, checkpoint: Path) -> tuple[Path, Path | None]:
+    from parallel_engine import ThroughputETA, worker_settings, run_parallel
     from resume_state import (
-        CHUNK_SECONDS, OVERLAP_SECONDS, save_checkpoint,
-        render_transcripts, output_path, file_identity,
+        CHUNK_SECONDS, OVERLAP_SECONDS, save_checkpoint, render_transcripts,
+        output_path, file_identity, migrate_parallel_checkpoint,
+        sync_completed_blocks, completed_audio_ms,
     )
+    import time
 
+    duration = media_duration(source) or media_duration(original)
+    if not duration or duration <= 0:
+        raise RuntimeError('Не удалось определить длительность аудио для безопасного '
+                           'параллельного распознавания. Попробуйте WAV или MP3.')
+    total_ms = max(1, round(duration * 1000))
     model_name = job.get('model', 'small')
     language = job.get('language', 'ru')
     device = job.get('device', 'cpu')
-    duration = media_duration(source) or media_duration(original)
-    total_ms = round(duration * 1000) if duration and duration > 0 else None
+    performance = job.get('performance_mode', 'balanced')
+    reserve = job.get('resource_reserve', 20)
+    requested = job.get('worker_count', 0)
+    worker_count, cpu_threads = worker_settings(device, performance, requested, reserve)
+    event('log', message=f'Параллельные обработчики: {worker_count}; '
+          f'запас ресурсов: {reserve}% ({performance})')
 
+    migrate_parallel_checkpoint(state)
+    sync_completed_blocks(state)
+    save_checkpoint(checkpoint, state)
     txt = output_path(output, state['txt_name'], '.txt')
     srt = output_path(output, state['srt_name'], '.srt') if state['srt_name'] else None
-    if total_ms is not None and state['cursor_ms'] >= total_ms:
+    base_ms = state['base_cursor_ms']
+    chunks = [
+        (position, min(position + CHUNK_SECONDS * 1000, total_ms))
+        for position in range(base_ms, total_ms, CHUNK_SECONDS * 1000)
+        if str(position) not in state['completed_chunks']
+    ]
+    total_done_ms = completed_audio_ms(state)
+    if total_done_ms >= total_ms and not chunks:
         render_transcripts(state, output, original)
         checkpoint.unlink(missing_ok=True)
-        event('log', message='Расшифровка уже завершена; файлы восстановлены из контрольной точки.')
+        event('log', message='Все блоки уже были распознаны, результаты восстановлены.')
         return txt, srt
 
     event('status', message='Подготовка модели ' + model_name + '…')
     event('log', message='Устройство: ' +
           ('NVIDIA GPU (CUDA / float16)' if device == 'cuda' else 'CPU (int8)'))
-    event('log', message='Первый запуск модели может потребовать загрузки из интернета.')
-    model = create_whisper_model(model_name, device)
-    event('status', message='Распознавание речи с сохранением контрольных точек…')
+    model = create_whisper_model(model_name, device,
+                                 workers=worker_count, cpu_threads=cpu_threads)
+    event('status', message='Параллельное распознавание с контрольными точками…')
+    event('progress', value=min(99, int(pct_start +
+                                          (100 - pct_start) * total_done_ms / total_ms)))
+    event('eta', remaining_seconds=None, workers=worker_count,
+          processed_audio_seconds=total_done_ms / 1000,
+          total_audio_seconds=total_ms / 1000)
 
-    cursor = int(state['cursor_ms'])
     expected_source = state['identity']['source']
-    while total_ms is None or cursor < total_ms:
-        # Reject a changed file rather than silently resuming the wrong content.
+    estimate = ThroughputETA(total_done_ms / 1000, total_ms / 1000)
+
+    def process_block(core_start: int, core_end: int):
         if file_identity(original) != expected_source:
             raise RuntimeError('Исходный файл изменился во время обработки. '
-                               'Сохранённый текст и контрольная точка не удалены.')
-        core_end = min(cursor + CHUNK_SECONDS * 1000, total_ms) if total_ms else cursor + CHUNK_SECONDS * 1000
-        start = max(0., cursor / 1000 - OVERLAP_SECONDS)
-        end = core_end / 1000 + (OVERLAP_SECONDS if total_ms is None or core_end < total_ms else 0)
+                               'Сохранённый текст и контрольные точки остаются на диске.')
+        start = max(0., core_start / 1000 - OVERLAP_SECONDS)
+        end = core_end / 1000 + (OVERLAP_SECONDS if core_end < total_ms else 0)
         samples = decode_transcription_chunk(source, start, end)
-        if not len(samples):
-            if cursor == 0:
-                raise RuntimeError('Не удалось прочитать звук для распознавания.')
-            event('log', message='Конец аудио достигнут раньше предполагаемой длительности.')
-            break
-        # Avoid hallucinations and zero-length chunks; at the end core_end is
-        # reduced to actual decoded duration if the media metadata was inaccurate.
         decoded_end = round(start * 1000 + len(samples) / 16)
-        if total_ms is None:
-            core_end = min(core_end, decoded_end)
-        if core_end <= cursor:
-            break
-
+        if not len(samples) or decoded_end + 2000 < core_end:
+            raise RuntimeError('Не удалось прочитать аудио до ' +
+                               timecode(core_end / 1000) + '. Проверьте файл.')
+        # CTranslate2 is configured with num_workers to serve concurrent calls
+        # without duplicating the model separately in every Python process.
         effective_language = state.get('detected_language') if language == 'auto' else language
         segments, info = model.transcribe(
             samples, language=effective_language,
@@ -340,30 +367,49 @@ def transcribe(source: Path, original: Path, output: Path, job: dict, pct_start:
             a = max(0, round(start * 1000 + float(segment.start) * 1000))
             b = min(round(end * 1000), round(start * 1000 + float(segment.end) * 1000))
             midpoint = (a + b) / 2
-            # Overlapping windows provide context. Each phrase belongs to exactly
-            # one committed, non-overlapping "core" interval.
-            if b > a and cursor <= midpoint < core_end:
+            if b > a and core_start <= midpoint < core_end:
                 additions.append([a, b, words])
+        return additions, info.language
 
-        # Commit one whole block. A power failure within inference leaves the
-        # preceding complete block intact. TXT/SRT are derived from this state.
-        state['segments'].extend(additions)
+    def commit_block(core_start: int, core_end: int, result):
+        if str(core_start) in state['completed_chunks']:
+            return
+        additions, detected_language = result
+        state['completed_chunks'][str(core_start)] = {
+            'end_ms': core_end,
+            'segments': additions,
+        }
         if language == 'auto' and not state.get('detected_language'):
-            state['detected_language'] = info.language
-        state['cursor_ms'] = int(core_end)
+            state['detected_language'] = detected_language
+        contiguous = sync_completed_blocks(state)
+        # Save authoritative data BEFORE regenerating human-readable output.
+        # An interruption between these operations is safe to recover.
         save_checkpoint(checkpoint, state)
         render_transcripts(state, output, original)
-        cursor = state['cursor_ms']
-        pct = (pct_start + (100 - pct_start) * cursor / total_ms) if total_ms else pct_start
-        event('progress', value=min(99, int(pct)))
-        event('status', message='Сохранено до ' + timecode(cursor / 1000) +
-              ' · фрагментов: ' + str(len(state['segments'])))
-        event('log', message='Контрольная точка: ' + timecode(cursor / 1000) +
-              ' (новых фраз: ' + str(len(additions)) + ')')
+        done_ms = completed_audio_ms(state)
+        remaining = estimate.record((core_end - core_start) / 1000, done_ms / 1000)
+        event('progress', value=min(99, int(pct_start +
+                                          (100 - pct_start) * done_ms / total_ms)))
+        event('eta', remaining_seconds=round(remaining) if remaining is not None else None,
+              workers=worker_count, processed_audio_seconds=done_ms / 1000,
+              total_audio_seconds=total_ms / 1000)
+        event('status', message='Сохранено ' + timecode(done_ms / 1000) +
+              ' из ' + timecode(total_ms / 1000) +
+              f' · готовых фрагментов: {len(state["completed_chunks"])}')
+        event('log', message='Контрольная точка: ' + timecode(contiguous / 1000) +
+              f' · обработано {done_ms / total_ms * 100:.1f}%')
 
+    run_parallel(chunks, worker_count, process_block, commit_block,
+                 performance=performance, reserve=reserve, device=device)
+    if completed_audio_ms(state) < total_ms:
+        raise RuntimeError('Не все фрагменты удалось сохранить. Контрольная точка '
+                           'оставлена для повторного запуска.')
     render_transcripts(state, output, original)
     checkpoint.unlink(missing_ok=True)
-    event('log', message='Расшифровка завершена; контрольная точка закрыта.')
+    event('eta', remaining_seconds=0, workers=worker_count,
+          processed_audio_seconds=total_ms / 1000,
+          total_audio_seconds=total_ms / 1000)
+    event('log', message='Расшифровка завершена; все контрольные точки закрыты.')
     event('log', message='Текст сохранён: ' + txt.name)
     if srt:
         event('log', message='Субтитры сохранены: ' + srt.name)
