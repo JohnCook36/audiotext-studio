@@ -1,0 +1,71 @@
+name: Deploy AudioText License API
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'license-service/**'
+      - '.github/workflows/deploy-license-api.yml'
+permissions:
+  contents: read
+concurrency:
+  group: audiotext-license-production
+  cancel-in-progress: false
+jobs:
+  deploy:
+    if: ${{ vars.LICENSING_DEPLOY_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: license-service
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+      ATS_D1_DATABASE_ID: ${{ vars.CLOUDFLARE_D1_DATABASE_ID }}
+      ATS_SIGNING_PRIVATE_KEY: ${{ secrets.ATS_SIGNING_PRIVATE_KEY }}
+      ATS_SIGNING_PUBLIC_KEY: ${{ secrets.ATS_SIGNING_PUBLIC_KEY }}
+      ATS_ADMIN_TOKEN: ${{ secrets.ATS_ADMIN_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install Wrangler
+        run: npm install --no-fund --no-audit
+      - name: Run licensing tests
+        run: node --test test/*.test.mjs
+      - name: Prepare D1 binding and temporary secret bundle
+        run: |
+          python - <<'PY'
+          import json, os, re, base64
+          from pathlib import Path
+          required = ('CLOUDFLARE_API_TOKEN', 'CLOUDFLARE_ACCOUNT_ID', 'ATS_D1_DATABASE_ID',
+                      'ATS_SIGNING_PRIVATE_KEY', 'ATS_SIGNING_PUBLIC_KEY', 'ATS_ADMIN_TOKEN')
+          missing = [name for name in required if not os.getenv(name)]
+          if missing:
+              raise SystemExit('Missing configuration: ' + ', '.join(missing))
+          uuid = os.environ['ATS_D1_DATABASE_ID']
+          if not re.fullmatch(r'[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}', uuid):
+              raise SystemExit('Invalid D1 database UUID')
+          for name in ('ATS_SIGNING_PRIVATE_KEY', 'ATS_SIGNING_PUBLIC_KEY'):
+              base64.b64decode(os.environ[name], validate=True)
+          cfg = Path('wrangler.toml')
+          text = cfg.read_text(encoding='utf-8')
+          assert 'REPLACE_WITH_D1_DATABASE_UUID' in text
+          cfg.write_text(text.replace('REPLACE_WITH_D1_DATABASE_UUID', uuid), encoding='utf-8')
+          secrets_file = Path('.deploy-secrets.json')
+          secrets_file.write_text(json.dumps({
+              key: os.environ[key] for key in
+              ('ATS_SIGNING_PRIVATE_KEY','ATS_SIGNING_PUBLIC_KEY','ATS_ADMIN_TOKEN')
+          }), encoding='utf-8')
+          secrets_file.chmod(0o600)
+          print('D1 config and temporary Worker secrets prepared.')
+          PY
+      - name: Apply remote D1 migrations
+        run: npx wrangler d1 migrations apply audiotext-studio-licenses --remote
+      - name: Deploy Worker and secrets
+        run: npx wrangler deploy --secrets-file .deploy-secrets.json
+      - name: Remove temporary secret file
+        if: always()
+        run: rm -f .deploy-secrets.json
