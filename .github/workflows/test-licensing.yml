@@ -1,0 +1,22 @@
+name: Verify License Service
+on:
+  push:
+    branches: [feat/cloudflare-licensing]
+    paths:
+      - 'license-service/**'
+      - '.github/workflows/test-licensing.yml'
+  pull_request:
+    paths:
+      - 'license-service/**'
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Test activation, single-device binding and revocation
+        run: node --test license-service/test/*.test.mjs
+      - name: Validate Python administrator utilities
+        run: python -m py_compile license-service/scripts/*.py
