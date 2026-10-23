@@ -3,8 +3,6 @@ import assert from "node:assert/strict";
 import { webcrypto as crypto } from "node:crypto";
 import worker from "../src/index.mjs";
 
-globalThis.crypto = crypto;
-
 class FakeD1 {
   constructor(){ this.rows=[]; }
   prepare(sql) {
